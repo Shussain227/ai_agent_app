@@ -1,8 +1,15 @@
 import streamlit as st
+import os
 import sys
 import traceback
 import asyncio
 from abc import ABC, abstractmethod
+
+# CRITICAL: Remove proxy environment variables that cause OpenAI client issues
+proxy_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']
+for var in proxy_vars:
+    if var in os.environ:
+        del os.environ[var]
 
 # Fix SQLite compatibility issue for ChromaDB
 try:
@@ -59,6 +66,48 @@ except RuntimeError as e:
         st.error(f"Runtime error with ChromaDB: {e}")
         CHROMADB_AVAILABLE = False
 
+# Helper function to create OpenAI client safely
+def create_openai_client(api_key: str):
+    """Create OpenAI client with multiple fallback methods for Streamlit Cloud compatibility"""
+    
+    # Method 1: Basic initialization (most common)
+    try:
+        return openai.OpenAI(api_key=api_key)
+    except Exception as e1:
+        st.warning(f"Standard OpenAI init failed: {e1}")
+        
+        # Method 2: With explicit timeout and no proxies
+        try:
+            return openai.OpenAI(
+                api_key=api_key,
+                timeout=60.0,
+                max_retries=2
+            )
+        except Exception as e2:
+            st.warning(f"OpenAI with timeout failed: {e2}")
+            
+            # Method 3: Legacy style initialization
+            try:
+                # Set API key globally as fallback
+                openai.api_key = api_key
+                client = openai.OpenAI(api_key=api_key)
+                return client
+            except Exception as e3:
+                st.error("All OpenAI client initialization methods failed:")
+                st.error(f"Method 1 (standard): {e1}")
+                st.error(f"Method 2 (timeout): {e2}")
+                st.error(f"Method 3 (legacy): {e3}")
+                raise Exception(f"Cannot create OpenAI client. Final error: {e3}")
+
+# Helper function to create Anthropic client safely
+def create_anthropic_client(api_key: str):
+    """Create Anthropic client with error handling"""
+    try:
+        return anthropic.Anthropic(api_key=api_key)
+    except Exception as e:
+        st.error(f"Failed to create Anthropic client: {e}")
+        raise
+
 # Initialize session state for all agents
 session_keys = [
     'simple_agent', 'rag_agent', 'research_manager', 'multi_llm_agent',
@@ -73,7 +122,7 @@ for key in session_keys:
 
 class SimpleTaskAgent:
     def __init__(self, openai_api_key: str):
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = create_openai_client(openai_api_key)
         
         self.tools = [
             {
@@ -194,7 +243,7 @@ class RAGAgent:
         if not CHROMADB_AVAILABLE:
             raise ImportError("ChromaDB not available")
             
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = create_openai_client(openai_api_key)
         self.encoding = tiktoken.encoding_for_model("gpt-4")
         
         # Initialize ChromaDB
@@ -339,7 +388,7 @@ class BaseAgent(ABC):
     def __init__(self, name: str, role: str, openai_api_key: str):
         self.name = name
         self.role = role
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = create_openai_client(openai_api_key)
         self.conversation_history = []
     
     @abstractmethod
@@ -520,7 +569,7 @@ class ResearchManager:
         """
         
         try:
-            client = openai.OpenAI(api_key=self.openai_api_key)
+            client = create_openai_client(self.openai_api_key)
             response = client.chat.completions.create(
                 model="gpt-4",
                 messages=[
@@ -555,11 +604,16 @@ class TaskType(Enum):
 
 class MultiLLMAgent:
     def __init__(self, openai_api_key: str, claude_api_key: str = None):
-        self.openai_client = openai.OpenAI(api_key=openai_api_key)
+        self.openai_client = create_openai_client(openai_api_key)
         
         if claude_api_key and ANTHROPIC_AVAILABLE:
-            self.claude_client = anthropic.Anthropic(api_key=claude_api_key)
-            self.claude_available = True
+            try:
+                self.claude_client = create_anthropic_client(claude_api_key)
+                self.claude_available = True
+            except Exception as e:
+                st.warning(f"Claude client creation failed: {e}")
+                self.claude_client = None
+                self.claude_available = False
         else:
             self.claude_client = None
             self.claude_available = False
@@ -650,14 +704,14 @@ class MultiLLMAgent:
     def call_claude(self, prompt: str, system_message: str = None) -> Dict[str, Any]:
         if not self.claude_available:
             return {
-                "provider": "Claude", "model": "claude-sonnet-4-20250514",
+                "provider": "Claude", "model": "claude-3-sonnet-20240229",
                 "response": "Claude API not available",
                 "timestamp": datetime.now().isoformat(), "status": "error"
             }
         
         try:
             messages = [{"role": "user", "content": prompt}]
-            kwargs = {"model": "claude-sonnet-4-20250514", "max_tokens": 1000, "messages": messages}
+            kwargs = {"model": "claude-3-sonnet-20240229", "max_tokens": 1000, "messages": messages}
             
             if system_message:
                 kwargs["system"] = system_message
@@ -665,13 +719,13 @@ class MultiLLMAgent:
             response = self.claude_client.messages.create(**kwargs)
             
             return {
-                "provider": "Claude", "model": "claude-sonnet-4-20250514",
+                "provider": "Claude", "model": "claude-3-sonnet-20240229",
                 "response": response.content[0].text,
                 "timestamp": datetime.now().isoformat(), "status": "success"
             }
         except Exception as e:
             return {
-                "provider": "Claude", "model": "claude-sonnet-4-20250514",
+                "provider": "Claude", "model": "claude-3-sonnet-20240229",
                 "response": f"Error: {str(e)}",
                 "timestamp": datetime.now().isoformat(), "status": "error"
             }
@@ -710,7 +764,7 @@ class MultiLLMAgent:
                 "best_for": "Technical tasks, programming, structured problem solving"
             },
             ModelProvider.CLAUDE: {
-                "provider": "Claude", "model": "claude-sonnet-4-20250514",
+                "provider": "Claude", "model": "claude-3-sonnet-20240229",
                 "strengths": ["Analysis", "Creative writing", "Long-form content", "Nuanced reasoning"],
                 "best_for": "Analysis, creative tasks, detailed explanations"
             },
@@ -816,6 +870,18 @@ def main():
         else:
             st.sidebar.error(f"❌ {name}")
     
+    # Debug info
+    with st.sidebar.expander("🔍 Debug Information"):
+        st.text(f"Python: {sys.version}")
+        st.text(f"Streamlit: {st.__version__}")
+        
+        # Show if proxy vars were found
+        proxy_found = any(var in os.environ for var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'])
+        if proxy_found:
+            st.warning("Proxy variables detected (may cause OpenAI issues)")
+        else:
+            st.success("No proxy variables detected")
+    
     # API Keys
     st.sidebar.markdown("---")
     st.sidebar.markdown("## API Configuration")
@@ -829,15 +895,20 @@ def main():
         st.sidebar.success("✅ OpenAI key from secrets")
     except:
         openai_key = st.sidebar.text_input("OpenAI API Key:", type="password")
+        if openai_key:
+            st.sidebar.info("OpenAI key entered manually")
     
     try:
         claude_key = st.secrets["CLAUDE_API_KEY"]
         st.sidebar.success("✅ Claude key from secrets")
     except:
         claude_key = st.sidebar.text_input("Claude API Key (optional):", type="password")
+        if claude_key:
+            st.sidebar.info("Claude key entered manually")
     
     if not openai_key:
         st.warning("Please enter your OpenAI API key to use the demos.")
+        st.info("💡 For Streamlit Cloud: Add `OPENAI_API_KEY = \"your_key\"` to your app secrets")
         return
     
     # Navigation
@@ -862,7 +933,8 @@ def main():
         if CHROMADB_AVAILABLE:
             show_rag_agent_demo(openai_key)
         else:
-            st.error("ChromaDB not available. RAG features disabled.")
+            st.error("ChromaDB not available. Please check Python version and SQLite compatibility.")
+            st.info("Try: Change Python version to 3.11 in Advanced Settings")
     elif "Multi-Agent Research" in selected_demo:
         show_research_system_demo(openai_key)
     elif "Multi-LLM System" in selected_demo:
@@ -934,7 +1006,11 @@ def show_simple_agent_demo(openai_key):
                 st.session_state.simple_agent = SimpleTaskAgent(openai_key)
             st.success("✅ Simple Task Agent ready!")
         except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
+            st.error(f"❌ Error initializing agent:")
+            st.error(str(e))
+            
+            with st.expander("🔍 Error Details"):
+                st.code(traceback.format_exc())
             return
     
     # Example buttons
