@@ -650,14 +650,14 @@ class MultiLLMAgent:
     def call_claude(self, prompt: str, system_message: str = None) -> Dict[str, Any]:
         if not self.claude_available:
             return {
-                "provider": "Claude", "model": "claude-3-sonnet-20240229",
+                "provider": "Claude", "model": "claude-sonnet-4-20250514",
                 "response": "Claude API not available",
                 "timestamp": datetime.now().isoformat(), "status": "error"
             }
         
         try:
             messages = [{"role": "user", "content": prompt}]
-            kwargs = {"model": "claude-3-sonnet-20240229", "max_tokens": 1000, "messages": messages}
+            kwargs = {"model": "claude-sonnet-4-20250514", "max_tokens": 1000, "messages": messages}
             
             if system_message:
                 kwargs["system"] = system_message
@@ -665,13 +665,13 @@ class MultiLLMAgent:
             response = self.claude_client.messages.create(**kwargs)
             
             return {
-                "provider": "Claude", "model": "claude-3-sonnet-20240229",
+                "provider": "Claude", "model": "claude-sonnet-4-20250514",
                 "response": response.content[0].text,
                 "timestamp": datetime.now().isoformat(), "status": "success"
             }
         except Exception as e:
             return {
-                "provider": "Claude", "model": "claude-3-sonnet-20240229",
+                "provider": "Claude", "model": "claude-sonnet-4-20250514",
                 "response": f"Error: {str(e)}",
                 "timestamp": datetime.now().isoformat(), "status": "error"
             }
@@ -710,7 +710,7 @@ class MultiLLMAgent:
                 "best_for": "Technical tasks, programming, structured problem solving"
             },
             ModelProvider.CLAUDE: {
-                "provider": "Claude", "model": "claude-3-sonnet-20240229",
+                "provider": "Claude", "model": "claude-sonnet-4-20250514",
                 "strengths": ["Analysis", "Creative writing", "Long-form content", "Nuanced reasoning"],
                 "best_for": "Analysis, creative tasks, detailed explanations"
             },
