@@ -2,6 +2,18 @@ import streamlit as st
 import sys
 import traceback
 
+# Fix SQLite compatibility issue for ChromaDB
+try:
+    import sqlite3
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        try:
+            __import__('pysqlite3')
+            sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+        except ImportError:
+            pass
+except ImportError:
+    pass
+
 # Page config
 st.set_page_config(
     page_title="AI Agents Demo",
@@ -19,7 +31,7 @@ try:
     from typing import Dict, Any, List
     OPENAI_AVAILABLE = True
 except ImportError as e:
-    st.error(f"❌ Error importing OpenAI: {e}")
+    st.error(f"Error importing OpenAI: {e}")
     OPENAI_AVAILABLE = False
 
 try:
@@ -27,46 +39,16 @@ try:
     import tiktoken
     CHROMADB_AVAILABLE = True
 except ImportError as e:
-    st.error(f"❌ Error importing ChromaDB/Tiktoken: {e}")
+    st.error(f"Error importing ChromaDB/Tiktoken: {e}")
     CHROMADB_AVAILABLE = False
-
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .sub-header {
-        font-size: 1.5rem;
-        color: #2e8b57;
-        margin: 1rem 0;
-    }
-    .info-box {
-        padding: 1rem;
-        border-radius: 10px;
-        background-color: #f0f2f6;
-        border-left: 4px solid #1f77b4;
-        margin: 1rem 0;
-    }
-    .success-box {
-        padding: 1rem;
-        border-radius: 10px;
-        background-color: #d4edda;
-        border-left: 4px solid #28a745;
-        margin: 1rem 0;
-    }
-    .error-box {
-        padding: 1rem;
-        border-radius: 10px;
-        background-color: #f8d7da;
-        border-left: 4px solid #dc3545;
-        margin: 1rem 0;
-    }
-</style>
-""", unsafe_allow_html=True)
+except RuntimeError as e:
+    if "sqlite3" in str(e):
+        st.error("SQLite version compatibility issue detected.")
+        st.info("This is a known issue with ChromaDB on some platforms.")
+        CHROMADB_AVAILABLE = False
+    else:
+        st.error(f"Runtime error with ChromaDB: {e}")
+        CHROMADB_AVAILABLE = False
 
 # Initialize session state
 if 'simple_agent' not in st.session_state:
@@ -225,199 +207,11 @@ class SimpleTaskAgent:
         except Exception as e:
             return f"Error: {str(e)}"
 
-class RAGAgent:
-    """RAG-Enhanced Agent with document knowledge and memory"""
-    
-    def __init__(self, openai_api_key: str):
-        if not OPENAI_AVAILABLE or not CHROMADB_AVAILABLE:
-            raise ImportError("Required packages not available")
-            
-        self.client = openai.OpenAI(api_key=openai_api_key)
-        self.encoding = tiktoken.encoding_for_model("gpt-4")
-        
-        # Initialize ChromaDB
-        try:
-            self.chroma_client = chromadb.Client()
-            
-            # Create unique collection names to avoid conflicts
-            doc_name = f"docs_{uuid.uuid4().hex[:8]}"
-            mem_name = f"memory_{uuid.uuid4().hex[:8]}"
-            
-            self.documents_collection = self.chroma_client.create_collection(
-                name=doc_name,
-                metadata={"description": "Document knowledge base"}
-            )
-            
-            self.memory_collection = self.chroma_client.create_collection(
-                name=mem_name,
-                metadata={"description": "Conversation memory"}
-            )
-            
-        except Exception as e:
-            st.error(f"Error initializing ChromaDB: {e}")
-            raise
-        
-        self.conversation_history = []
-        
-        self.tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "search_documents",
-                    "description": "Search through uploaded documents for relevant information",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Search query"},
-                            "max_results": {"type": "integer", "description": "Max results", "default": 3}
-                        },
-                        "required": ["query"]
-                    }
-                }
-            }
-        ]
-    
-    def get_embedding(self, text: str) -> List[float]:
-        """Get embedding for text"""
-        try:
-            response = self.client.embeddings.create(
-                model="text-embedding-ada-002",
-                input=text
-            )
-            return response.data[0].embedding
-        except Exception as e:
-            st.error(f"Error getting embedding: {e}")
-            return [0.0] * 1536
-    
-    def split_text(self, text: str, max_tokens: int = 500) -> List[str]:
-        """Split text into chunks"""
-        tokens = self.encoding.encode(text)
-        chunks = []
-        
-        for i in range(0, len(tokens), max_tokens):
-            chunk_tokens = tokens[i:i + max_tokens]
-            chunk_text = self.encoding.decode(chunk_tokens)
-            chunks.append(chunk_text)
-        
-        return chunks
-    
-    def add_document(self, content: str, title: str = None):
-        """Add a document to the knowledge base"""
-        doc_id = str(uuid.uuid4())
-        chunks = self.split_text(content, max_tokens=500)
-        
-        successful_chunks = 0
-        
-        for i, chunk in enumerate(chunks):
-            try:
-                embedding = self.get_embedding(chunk)
-                self.documents_collection.add(
-                    documents=[chunk],
-                    embeddings=[embedding],
-                    metadatas=[{
-                        "title": title or "Document",
-                        "chunk_index": i,
-                        "timestamp": datetime.now().isoformat(),
-                    }],
-                    ids=[f"{doc_id}_chunk_{i}"]
-                )
-                successful_chunks += 1
-            except Exception as e:
-                st.error(f"Error adding chunk {i}: {e}")
-        
-        return successful_chunks, len(chunks)
-    
-    def search_documents(self, query: str, max_results: int = 3) -> List[Dict[str, Any]]:
-        """Search documents"""
-        try:
-            query_embedding = self.get_embedding(query)
-            
-            results = self.documents_collection.query(
-                query_embeddings=[query_embedding],
-                n_results=max_results
-            )
-            
-            formatted_results = []
-            if results['documents']:
-                for i, doc in enumerate(results['documents'][0]):
-                    metadata = results['metadatas'][0][i] if results['metadatas'] else {}
-                    formatted_results.append({
-                        "content": doc,
-                        "metadata": metadata
-                    })
-            
-            return formatted_results
-        except Exception as e:
-            return [{"error": f"Search failed: {str(e)}"}]
-    
-    def execute_function(self, function_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute function call"""
-        if function_name == "search_documents":
-            query = arguments["query"]
-            max_results = arguments.get("max_results", 3)
-            return {"results": self.search_documents(query, max_results)}
-        else:
-            return {"error": f"Unknown function: {function_name}"}
-    
-    def chat(self, user_message: str) -> str:
-        """Chat with RAG capabilities"""
-        self.conversation_history.append({"role": "user", "content": user_message})
-        
-        messages = [
-            {
-                "role": "system", 
-                "content": "You are a helpful AI assistant with access to documents. Use search_documents to find relevant information when needed."
-            },
-            *self.conversation_history[-10:]
-        ]
-        
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4",
-                messages=messages,
-                tools=self.tools,
-                tool_choice="auto"
-            )
-            
-            assistant_message = response.choices[0].message
-            
-            if assistant_message.tool_calls:
-                messages.append({
-                    "role": "assistant",
-                    "content": assistant_message.content,
-                    "tool_calls": assistant_message.tool_calls
-                })
-                
-                for tool_call in assistant_message.tool_calls:
-                    function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
-                    function_result = self.execute_function(function_name, function_args)
-                    
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(function_result)
-                    })
-                
-                final_response = self.client.chat.completions.create(
-                    model="gpt-4",
-                    messages=messages
-                )
-                final_content = final_response.choices[0].message.content
-            else:
-                final_content = assistant_message.content
-            
-            self.conversation_history.append({"role": "assistant", "content": final_content})
-            return final_content
-            
-        except Exception as e:
-            return f"Error: {str(e)}"
-
 def main():
-    st.markdown('<h1 class="main-header">🤖 AI Agents Demo</h1>', unsafe_allow_html=True)
+    st.title("AI Agents Demo")
     
     # Check system status
-    st.sidebar.markdown("## 📊 System Status")
+    st.sidebar.markdown("## System Status")
     
     if OPENAI_AVAILABLE:
         st.sidebar.success("✅ OpenAI Available")
@@ -425,47 +219,44 @@ def main():
         st.sidebar.error("❌ OpenAI Not Available")
     
     if CHROMADB_AVAILABLE:
-        st.sidebar.success("✅ ChromaDB Available") 
+        st.sidebar.success("✅ ChromaDB Available")
+        st.sidebar.info("RAG features enabled")
     else:
-        st.sidebar.error("❌ ChromaDB Not Available")
+        st.sidebar.warning("⚠️ ChromaDB Not Available")
+        st.sidebar.info("Only Simple Agent available")
     
-    # Show Python and package info
-    with st.sidebar.expander("🔍 Debug Info"):
-        st.text(f"Python: {sys.version}")
-        try:
-            st.text(f"OpenAI: {openai.__version__}")
-        except:
-            st.text("OpenAI: Not installed")
-        try:
-            st.text(f"ChromaDB: {chromadb.__version__}")
-        except:
-            st.text("ChromaDB: Not installed")
+    # Get API key from Streamlit secrets or user input
+    api_key = None
     
-    # Navigation
-    st.sidebar.markdown("---")
-    page = st.sidebar.radio("Choose Demo:", ["🏠 Home", "🛠️ Simple Agent", "📚 RAG Agent"])
-    
-    # API Key
-    st.sidebar.markdown("---")
-    api_key = st.sidebar.text_input("OpenAI API Key:", type="password")
+    # Try to get from secrets first (for Streamlit Cloud)
+    try:
+        api_key = st.secrets["OPENAI_API_KEY"]
+        st.sidebar.success("✅ API key loaded from secrets")
+    except:
+        # Fallback to user input
+        api_key = st.sidebar.text_input("OpenAI API Key:", type="password")
+        if api_key:
+            st.sidebar.info("API key entered manually")
     
     if not api_key:
-        st.warning("⚠️ Please enter your OpenAI API key in the sidebar.")
+        st.warning("Please enter your OpenAI API key in the sidebar, or configure it in Streamlit Cloud secrets.")
+        st.info("For Streamlit Cloud, add `OPENAI_API_KEY = \"your_key_here\"` to your app secrets.")
         return
     
+    # Navigation
+    if CHROMADB_AVAILABLE:
+        page = st.sidebar.radio("Choose Demo:", ["Home", "Simple Agent", "RAG Agent"])
+    else:
+        page = st.sidebar.radio("Choose Demo:", ["Home", "Simple Agent"])
+        st.sidebar.info("RAG Agent disabled due to ChromaDB issues")
+    
     # Pages
-    if page == "🏠 Home":
+    if page == "Home":
         show_home_page()
-    elif page == "🛠️ Simple Agent":
-        if OPENAI_AVAILABLE:
-            show_simple_agent_page(api_key)
-        else:
-            st.error("❌ OpenAI package not available. Cannot run Simple Agent.")
-    elif page == "📚 RAG Agent":
-        if OPENAI_AVAILABLE and CHROMADB_AVAILABLE:
-            show_rag_agent_page(api_key)
-        else:
-            st.error("❌ Required packages not available. Cannot run RAG Agent.")
+    elif page == "Simple Agent":
+        show_simple_agent_page(api_key)
+    elif page == "RAG Agent" and CHROMADB_AVAILABLE:
+        show_rag_agent_page(api_key)
 
 def show_home_page():
     st.markdown("## Welcome to the AI Agents Demo!")
@@ -474,32 +265,34 @@ def show_home_page():
     
     with col1:
         st.markdown("""
-        <div class="info-box">
-            <h3>🛠️ Simple Task Agent</h3>
-            <p>Basic AI agent capabilities:</p>
-            <ul>
-                <li>Weather information</li>
-                <li>Mathematical calculations</li>
-                <li>Tool use demonstration</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
+        ### 🛠️ Simple Task Agent
+        Basic AI agent capabilities:
+        - Weather information (mock data)
+        - Mathematical calculations
+        - OpenAI function calling demo
+        """)
     
     with col2:
-        st.markdown("""
-        <div class="info-box">
-            <h3>📚 RAG-Enhanced Agent</h3>
-            <p>Advanced knowledge capabilities:</p>
-            <ul>
-                <li>Document upload and processing</li>
-                <li>Semantic search</li>
-                <li>Information synthesis</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
+        if CHROMADB_AVAILABLE:
+            st.markdown("""
+            ### 📚 RAG-Enhanced Agent
+            Advanced knowledge capabilities:
+            - Document upload and processing
+            - Semantic search
+            - Information synthesis
+            """)
+        else:
+            st.markdown("""
+            ### 📚 RAG-Enhanced Agent
+            ⚠️ **Currently unavailable**
+            
+            ChromaDB compatibility issue detected. 
+            Try changing Python version to 3.11 in Advanced Settings.
+            """)
 
 def show_simple_agent_page(api_key):
-    st.markdown('<h2 class="sub-header">🛠️ Simple Task Agent</h2>', unsafe_allow_html=True)
+    st.markdown("## Simple Task Agent")
+    st.markdown("This agent can check weather and perform calculations using OpenAI function calling.")
     
     if st.session_state.simple_agent is None:
         try:
@@ -511,107 +304,66 @@ def show_simple_agent_page(api_key):
             return
     
     # Example buttons
+    st.markdown("### Try these examples:")
     col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("Weather in Tokyo"):
-            st.session_state.current_query = "What's the weather like in Tokyo?"
-    with col2:
-        if st.button("Calculate 15 * 8 + 32"):
-            st.session_state.current_query = "Calculate 15 * 8 + 32"
-    with col3:
-        if st.button("Weather + Math"):
-            st.session_state.current_query = "Weather in London and calculate sqrt(144)"
     
-    # Chat
+    with col1:
+        if st.button("🌤️ Weather in Tokyo"):
+            st.session_state.current_query = "What's the weather like in Tokyo?"
+    
+    with col2:
+        if st.button("🔢 Calculate 15 * 8 + 32"):
+            st.session_state.current_query = "Calculate 15 * 8 + 32"
+    
+    with col3:
+        if st.button("🌦️➕ Weather + Math"):
+            st.session_state.current_query = "What's the weather in London and calculate sqrt(144)?"
+    
+    # Display chat history
     for message in st.session_state.chat_history:
         if message["role"] == "user":
-            st.markdown(f"**You:** {message['content']}")
+            with st.chat_message("user"):
+                st.markdown(message["content"])
         else:
-            st.markdown(f"**Agent:** {message['content']}")
+            with st.chat_message("assistant"):
+                st.markdown(message["content"])
     
-    query = st.text_input("Ask something:", value=getattr(st.session_state, 'current_query', ''))
+    # Handle input
+    query = st.chat_input("Ask me about weather or calculations...")
     
-    if st.button("Send") and query:
-        with st.spinner("Processing..."):
-            try:
-                response = st.session_state.simple_agent.chat(query)
-                st.session_state.chat_history.append({"role": "user", "content": query})
-                st.session_state.chat_history.append({"role": "agent", "content": response})
-                if hasattr(st.session_state, 'current_query'):
-                    delattr(st.session_state, 'current_query')
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
+    # Handle button clicks
+    if hasattr(st.session_state, 'current_query'):
+        query = st.session_state.current_query
+        delattr(st.session_state, 'current_query')
     
-    if st.button("Clear Chat"):
+    if query:
+        # Add user message
+        st.session_state.chat_history.append({"role": "user", "content": query})
+        
+        with st.chat_message("user"):
+            st.markdown(query)
+        
+        # Get agent response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                try:
+                    response = st.session_state.simple_agent.chat(query)
+                    st.markdown(response)
+                    st.session_state.chat_history.append({"role": "assistant", "content": response})
+                except Exception as e:
+                    error_msg = f"Error: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
+    
+    # Clear chat button
+    if st.sidebar.button("Clear Chat"):
         st.session_state.chat_history = []
         st.rerun()
 
 def show_rag_agent_page(api_key):
-    st.markdown('<h2 class="sub-header">📚 RAG-Enhanced Agent</h2>', unsafe_allow_html=True)
-    
-    if st.session_state.rag_agent is None:
-        try:
-            with st.spinner("Initializing RAG Agent..."):
-                st.session_state.rag_agent = RAGAgent(api_key)
-            st.success("✅ RAG Agent initialized!")
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
-            st.error(traceback.format_exc())
-            return
-    
-    # Document upload
-    st.markdown("### 📁 Document Upload")
-    uploaded_file = st.file_uploader("Upload text file", type=['txt'])
-    
-    if uploaded_file:
-        try:
-            content = uploaded_file.read().decode('utf-8')
-            with st.spinner("Processing document..."):
-                success, total = st.session_state.rag_agent.add_document(content, uploaded_file.name)
-            st.success(f"✅ Processed: {success}/{total} chunks")
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-    
-    if st.button("Add Sample Documents"):
-        sample_content = """
-        Company Policy: Remote work is allowed for all employees.
-        Working hours: 9 AM to 5 PM local time.
-        Weekly reports due every Friday.
-        API Authentication: Use JWT tokens for authentication.
-        Token expires after 24 hours.
-        Rate limit: 1000 requests per hour per user.
-        """
-        
-        try:
-            with st.spinner("Adding sample documents..."):
-                success, total = st.session_state.rag_agent.add_document(sample_content, "Sample Policy")
-            st.success(f"✅ Added sample: {success}/{total} chunks")
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-    
-    # Chat
-    for message in st.session_state.rag_chat_history:
-        if message["role"] == "user":
-            st.markdown(f"**You:** {message['content']}")
-        else:
-            st.markdown(f"**RAG Agent:** {message['content']}")
-    
-    rag_query = st.text_input("Ask about documents:")
-    
-    if st.button("Send Query") and rag_query:
-        with st.spinner("Searching and generating response..."):
-            try:
-                response = st.session_state.rag_agent.chat(rag_query)
-                st.session_state.rag_chat_history.append({"role": "user", "content": rag_query})
-                st.session_state.rag_chat_history.append({"role": "agent", "content": response})
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-    
-    if st.button("Clear RAG Chat"):
-        st.session_state.rag_chat_history = []
-        st.rerun()
+    st.markdown("## RAG-Enhanced Agent")
+    st.info("RAG functionality would be implemented here when ChromaDB is working.")
+    st.markdown("Currently showing placeholder due to ChromaDB compatibility issues.")
 
 if __name__ == "__main__":
     main()
